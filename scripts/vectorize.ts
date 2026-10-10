@@ -31,13 +31,20 @@ const limitIdx = process.argv.indexOf('--limit');
 const limit =
 	limitIdx !== -1 ? parseInt(process.argv[limitIdx + 1], 10) : undefined;
 
+// Pinecone range filters need numbers, so store age (at death, or today).
+function ageAt(birth: Date | null, death: Date | null): number {
+	if (!birth) return -1;
+	return Math.floor(
+		((death ?? new Date()).getTime() - birth.getTime()) / 31_557_600_000,
+	);
+}
+
 async function main() {
 	await ensureIndexExists();
 
-	// TODO (in class): pull in the patient fields we decide to store as
-	// metadata, e.g. include: { patient: { select: { firstName: true } } }
 	const notes = await prisma.note.findMany({
 		take: limit,
+		include: { patient: true },
 		orderBy: { id: 'asc' },
 	});
 	console.log(
@@ -49,7 +56,12 @@ async function main() {
 		content: note.content, // the only part that gets embedded
 		metadata: {
 			patientId: note.patientId,
-			// TODO (in class): add the metadata fields we decide on.
+			dob: note.patient.birthDate?.toISOString().slice(0, 10) ?? 'unknown',
+			gender: note.patient.gender ?? 'unknown',
+			isAlive: note.patient.deathDate === null,
+			age: ageAt(note.patient.birthDate, note.patient.deathDate),
+			ethnicity: note.patient.ethnicity ?? 'unknown',
+			race: note.patient.race ?? 'unknown',
 		},
 	}));
 

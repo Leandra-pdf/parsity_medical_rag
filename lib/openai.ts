@@ -27,7 +27,7 @@ export async function createEmbedding(text: string): Promise<number[]> {
 	const response = await openai.embeddings.create({
 		model: 'text-embedding-3-small',
 		input: text,
-		dimensions: EMBEDDING_DIMENSIONS,
+		dimensions: EMBEDDING_DIMENSIONS, // length of numbers to get back, 512 1536 3072 - speed vs accuracy, depends on how much nuance you want to capture
 	});
 	return response.data[0].embedding;
 }

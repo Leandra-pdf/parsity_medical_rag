@@ -110,7 +110,7 @@ export async function upsertChunks(chunks: MedicalChunk[]): Promise<number> {
 		const embeddings = await createEmbeddings(texts);
 
 		const vectors = batch.map((chunk, idx) => ({
-			id: chunk.id,
+			id: chunk.id, // stops us from checking duplicates or the same chunks over and over
 			values: embeddings[idx],
 			metadata: {
 				...chunk.metadata,
