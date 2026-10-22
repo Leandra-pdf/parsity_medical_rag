@@ -16,6 +16,7 @@ import { pinecone } from './pinecone';
 export type VectorSearchOptions = {
 	topK?: number; // candidates the cosine search fetches
 	topN?: number; // candidates kept after reranking
+	filter?: object; // Optional metadata filters to narrow search results by fields such as gender or age.
 };
 
 export async function searchClinicalNotes(
@@ -28,7 +29,8 @@ export async function searchClinicalNotes(
 	const results = await pinecone.index(process.env.PINECONE_INDEX!).query({
 		vector: embedding, //query represented as 1536 vector
 		topK: 10,
-		includeMetadata: true, // contnet we got race / gender / age / etc.
+		includeMetadata: true, // content we got race / gender / age / etc.
+		...(options.filter ? { filter: options.filter } : {}),
 	});
 
 	const matchesWithScores = results.matches.map((match) => ({
