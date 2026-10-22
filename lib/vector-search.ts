@@ -21,25 +21,36 @@ export type VectorSearchOptions = {
 export async function searchClinicalNotes(
 	query: string,
 	options: VectorSearchOptions = {},
-): Promise<string[]> {
+): Promise<string> {
 	// query -> string[]
 	const embedding = await createEmbedding(query);
 	// search pinecone
 	const results = await pinecone.index(process.env.PINECONE_INDEX!).query({
 		vector: embedding, //query represented as 1536 vector
-		topK: 5,
-		includeMetadata: true, // content we got race / gender / age / etc.
+		topK: 10,
+		includeMetadata: true, // contnet we got race / gender / age / etc.
 	});
 
-	return results.matches.map((match) => match.metadata?.content as string);
-}
+	const matchesWithScores = results.matches.map((match) => ({
+		id: match.id,
+		score: match.score,
+		content: match.metadata?.content as string,
+		metadata: match.metadata,
+	}));
 
-// export async function searchClinicalNotes(
-// 	query: string,
-// 	options: VectorSearchOptions = {},
-// ): Promise<{
-// 	docs: SearchResult[];
-// 	rerankedDocuments: SearchResult[];
-// }> {
-// 	throw new Error('Not built yet — Week 2 (lib/vector-search.ts)');
-// }
+	const docs = results.matches.map(
+		(match) =>
+			`${match.metadata?.content} metadata: ${JSON.stringify(match.metadata)}`,
+	);
+
+	const reranked = await pinecone.inference.rerank({
+		model: 'bge-reranker-v2-m3',
+		query: query,
+		documents: docs,
+		topN: 10,
+	});
+
+	console.log(JSON.stringify(reranked.data, null, 2));
+
+	return reranked.data.map((result) => result.document?.text).join('\n');
+}
