@@ -29,16 +29,16 @@ const selectorAgentSchema = z.object({
 		.min(1)
 		.describe('The reason you rejected the query.'),
 	personalInfo: z
-		.object({
-			name: z.string().min(1).describe('The FULL name of the patient.'),
-			dob: z
-				.string()
-				.min(1)
-				.describe(
-					'The date of birth of the patient. In this format: YYYY-MM-DD',
-				),
-		})
-		.optional(),
+    .object({
+        name: z.string().min(1).describe('The FULL name of the patient.'),
+        dob: z
+            .string()
+            .min(1)
+            .describe(
+                'The date of birth of the patient. In this format: YYYY-MM-DD',
+            ),
+    })
+    .optional(),
 });
 
 const PRISMA_SCHEMA = `
