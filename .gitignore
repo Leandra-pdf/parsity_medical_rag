@@ -53,3 +53,5 @@ infra/litellm/.env
 
 output
 notes.py
+folder_structure.txt
+generate_tree.py
