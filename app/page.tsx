@@ -5,10 +5,18 @@ import ReactMarkdown from 'react-markdown';
 import { z } from 'zod';
 
 const SchedulingActionSchema = z.object({
+	kind: z.enum(['schedule', 'cancel', 'reschedule']).default('schedule'),
+	patientId: z.string().min(1),
 	patientName: z.string().min(1),
 	date: z.iso.date(),
 	time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
 	reason: z.string().nullish(),
+	// reschedule only: date/time above are the existing appointment
+	newDate: z.iso.date().nullish(),
+	newTime: z
+		.string()
+		.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+		.nullish(),
 });
 
 type SchedulingAction = z.infer<typeof SchedulingActionSchema>;
@@ -17,6 +25,9 @@ const ChatResponseSchema = z.object({
 	message: z.string(),
 	schedulingAction: SchedulingActionSchema.nullish(),
 });
+
+/** An error whose message came from the server and is safe to show. */
+class ApiError extends Error {}
 
 interface Message {
 	role: 'user' | 'assistant';
@@ -38,13 +49,92 @@ const EXAMPLE_QUERIES = [
 	'Which patients have had a stroke?',
 	'What do the clinical notes say about smoking?',
 	'Summarize the health history of one of the patients',
+	'Book Avery Mueller for next Tuesday at 2pm',
 ];
+
+
+/** Format appointment dates and times for display in the scheduling UI. */
+function formatAppointmentDate(date: string): string {
+	const [year, month, day] = date.split('-').map(Number);
+
+	return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString(
+		'en-US',
+		{
+			month: 'long',
+			day: 'numeric',
+			year: 'numeric',
+			timeZone: 'UTC',
+		},
+	);
+}
+
+function formatAppointmentTime(time: string): string {
+	const [hour, minute] = time.split(':').map(Number);
+	const period = hour >= 12 ? 'PM' : 'AM';
+	const displayHour = hour % 12 || 12;
+
+	return `${displayHour}:${String(minute).padStart(2, '0')} ${period}`;
+}
+
+const CARD_COPY = {
+	schedule: {
+		title: 'Schedule Appointment',
+		confirm: 'Confirm Appointment',
+		busy: 'Scheduling...',
+		decline: "Don't schedule",
+		declined:
+			'No problem — I haven’t scheduled the appointment. You can ask me to schedule it whenever you’re ready.',
+	},
+	cancel: {
+		title: 'Cancel Appointment',
+		confirm: 'Cancel Appointment',
+		busy: 'Cancelling...',
+		decline: "Don't cancel",
+		declined:
+			'No problem — I haven’t cancelled the appointment. It’s still on the calendar.',
+	},
+	reschedule: {
+		title: 'Reschedule Appointment',
+		confirm: 'Confirm New Time',
+		busy: 'Rescheduling...',
+		decline: "Don't reschedule",
+		declined:
+			'No problem — I haven’t rescheduled the appointment. It’s still at its original time.',
+	},
+} as const;
+
+function getFriendlyScheduleError(status: number): string {
+	if (status === 400) {
+		return 'Please check the appointment details and try again.';
+	}
+
+	if (status === 401 || status === 403 || status === 503) {
+		return 'The scheduling service is temporarily unavailable. Please try again later.';
+	}
+
+	if (status === 404) {
+		return 'That patient could not be found in the records.';
+	}
+
+	if (status === 409) {
+		return 'That time isn’t available. It is either outside the calendar’s availability or already booked. Please choose another date or time.';
+	}
+
+	if (status === 429) {
+		return 'Too many scheduling requests were made. Please wait a moment and try again.';
+	}
+
+	return 'We couldn’t schedule this appointment right now. Please try again in a moment.';
+}
+
 
 export default function Home() {
 	const [input, setInput] = useState('');
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [isLoading, setIsLoading] = useState(false);
 	const [scheduling, setScheduling] = useState<SchedulingState | null>(null);
+	const [slotError, setSlotError] = useState<string | null>(null);
+	const [isChecking, setIsChecking] = useState(false);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 
 	const scrollToBottom = () => {
@@ -54,6 +144,60 @@ export default function Home() {
 	useEffect(() => {
 		scrollToBottom();
 	}, [messages, scheduling, isLoading]);
+
+	// Validate the date/time in the confirmation box as it changes: not in the
+	// past, not unavailable, not conflicting. The server re-checks on submit.
+	const cardKind = scheduling?.action.kind;
+	const cardDate = scheduling?.date;
+	const cardTime = scheduling?.time;
+	const cardPatientId = scheduling?.action.patientId;
+	const existingDate = scheduling?.action.date;
+	const existingTime = scheduling?.action.time;
+	useEffect(() => {
+		setSlotError(null);
+		setIsChecking(false);
+		if (!cardKind || cardKind === 'cancel') return;
+		if (!cardDate || !cardTime) {
+			setSlotError('Choose a date and time.');
+			return;
+		}
+
+		const controller = new AbortController();
+		setIsChecking(true);
+		const timer = setTimeout(async () => {
+			try {
+				const response = await fetch('/api/schedule/check', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					signal: controller.signal,
+					body: JSON.stringify({
+						dateTime: `${cardDate}T${cardTime}:00`,
+						...(cardKind === 'reschedule'
+							? {
+									patientId: cardPatientId,
+									existingDateTime: `${existingDate}T${existingTime}:00`,
+								}
+							: {}),
+					}),
+				});
+				const result = await response.json().catch(() => ({}));
+				setSlotError(
+					result.ok === false
+						? (result.error ?? 'That time can’t be booked.')
+						: null,
+				);
+			} catch (error) {
+				if ((error as Error).name === 'AbortError') return;
+				setSlotError(null); // the server still checks on submit
+			}
+			setIsChecking(false);
+		}, 300);
+
+		return () => {
+			clearTimeout(timer);
+			controller.abort();
+		};
+	}, [cardKind, cardDate, cardTime, cardPatientId, existingDate, existingTime]);
 
 	const sendQuery = async (userMessage: string) => {
 		if (!userMessage.trim() || isLoading) return;
@@ -76,7 +220,14 @@ export default function Home() {
 				}),
 			});
 
-			if (!response.ok) throw new Error('Failed to get response');
+			if (!response.ok) {
+				const data = await response.json().catch(() => ({}));
+				throw new ApiError(
+					typeof data?.error === 'string'
+						? data.error
+						: 'Failed to get response',
+				);
+			}
 
 			const { message, schedulingAction } = ChatResponseSchema.parse(
 				await response.json(),
@@ -89,8 +240,8 @@ export default function Home() {
 			if (schedulingAction) {
 				setScheduling({
 					action: schedulingAction,
-					date: schedulingAction.date,
-					time: schedulingAction.time,
+					date: schedulingAction.newDate ?? schedulingAction.date,
+					time: schedulingAction.newTime ?? schedulingAction.time,
 					isSubmitting: false,
 				});
 			}
@@ -100,7 +251,10 @@ export default function Home() {
 				...prev,
 				{
 					role: 'assistant',
-					content: 'Sorry, I encountered an error. Please try again.',
+					content:
+						error instanceof ApiError
+							? error.message
+							: 'Sorry, I encountered an error. Please try again.',
 				},
 			]);
 		} finally {
@@ -120,20 +274,38 @@ export default function Home() {
 			prev ? { ...prev, isSubmitting: true } : null,
 		);
 
-		try {
-			const dateTime = `${scheduling.date}T${scheduling.time}:00`;
+		const { action } = scheduling;
+		const { kind } = action;
+		const selectedDateTime = `${scheduling.date}T${scheduling.time}:00`;
 
-			const response = await fetch('/api/schedule', {
+		try {
+			// For cancel/reschedule, action.date/time are the existing appointment.
+			const existingDateTime = `${action.date}T${action.time}:00`;
+			const endpoint =
+				kind === 'schedule' ? '/api/schedule' : `/api/schedule/${kind}`;
+			const payload =
+				kind === 'schedule'
+					? {
+							patientId: action.patientId,
+							dateTime: selectedDateTime,
+							notes: action.reason,
+						}
+					: kind === 'cancel'
+						? { patientId: action.patientId, dateTime: existingDateTime }
+						: {
+								patientId: action.patientId,
+								dateTime: existingDateTime,
+								newDateTime: selectedDateTime,
+							};
+
+			const response = await fetch(endpoint, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					patientName: scheduling.action.patientName,
-					dateTime,
-					notes: scheduling.action.reason,
-				}),
+				body: JSON.stringify(payload),
 			});
 
-			const result = await response.json();
+			const result = await response.json().catch(() => ({}));
+			const success = response.ok && result.success !== false;
 
 			setScheduling((prev) =>
 				prev
@@ -141,22 +313,28 @@ export default function Home() {
 							...prev,
 							isSubmitting: false,
 							result: {
-								success: response.ok,
-								message: result.message || result.error,
+								success,
+								message: success
+									? 'Done.'
+									: typeof result.error === 'string'
+? result.error
+										: getFriendlyScheduleError(response.status),
 							},
 						}
 					: null,
 			);
 
-			if (response.ok) {
-				// Add confirmation message
-				setMessages((prev) => [
-					...prev,
-					{
-						role: 'assistant',
-						content: `Appointment scheduled for **${scheduling.action.patientName}** on ${scheduling.date} at ${scheduling.time}.`,
-					},
-				]);
+			if (success) {
+				const patient = `**${action.patientName}**`;
+				const existing = `${formatAppointmentDate(action.date)} at ${formatAppointmentTime(action.time)}`;
+				const selected = `${formatAppointmentDate(scheduling.date)} at ${formatAppointmentTime(scheduling.time)}`;
+				const content =
+					kind === 'schedule'
+						? `Appointment booked with ${patient} for **${selected}**.`
+						: kind === 'cancel'
+							? `Cancelled the appointment with ${patient} on **${existing}**.`
+							: `Moved the appointment with ${patient} from **${existing}** to **${selected}**.`;
+				setMessages((prev) => [...prev, { role: 'assistant', content }]);
 			}
 		} catch (error) {
 			setScheduling((prev) =>
@@ -166,7 +344,7 @@ export default function Home() {
 							isSubmitting: false,
 							result: {
 								success: false,
-								message: 'Failed to schedule appointment',
+								message: 'We couldn’t connect to the scheduling service. Please check your connection and try again.',
 							},
 						}
 					: null,
@@ -294,8 +472,8 @@ export default function Home() {
 											/>
 										</svg>
 										<span className='font-semibold text-copilot-text'>
-											Schedule Appointment
-										</span>
+											{CARD_COPY[scheduling.action.kind].title}
+</span>
 									</div>
 
 									<p className='text-sm text-copilot-muted mb-3'>
@@ -305,7 +483,19 @@ export default function Home() {
 										</strong>
 									</p>
 
-									<div className='grid grid-cols-2 gap-3 mb-4'>
+									{scheduling.action.kind !== 'schedule' && (
+										<p className='text-sm text-copilot-muted mb-3'>
+											{scheduling.action.kind === 'cancel' ? 'Appointment' : 'Current appointment'}
+											:{' '}
+											<strong className='text-copilot-text'>
+												{formatAppointmentDate(scheduling.action.date)} at{' '}
+												{formatAppointmentTime(scheduling.action.time)}
+											</strong>
+										</p>
+									)}
+
+									{scheduling.action.kind !== 'cancel' && (
+										<div className='grid grid-cols-2 gap-3 mb-4'>
 										<div>
 											<label className='block text-xs text-copilot-muted mb-1'>
 												Date
@@ -350,7 +540,12 @@ export default function Home() {
 												className='w-full px-3 py-2 bg-copilot-input border border-copilot-border rounded text-copilot-text text-sm'
 											/>
 										</div>
-									</div>
+										</div>
+									)}
+
+									{slotError && (
+										<p className='text-sm text-red-400 mb-3'>{slotError}</p>
+									)}
 
 									{scheduling.result &&
 										!scheduling.result.success && (
@@ -361,7 +556,7 @@ export default function Home() {
 
 									<button
 										onClick={handleScheduleSubmit}
-										disabled={scheduling.isSubmitting}
+										disabled={scheduling.isSubmitting || isChecking || !!slotError}
 										className='w-full px-4 py-2 bg-copilot-accent text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium'
 									>
 										{scheduling.isSubmitting ? (
@@ -385,12 +580,31 @@ export default function Home() {
 														d='M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z'
 													/>
 												</svg>
-												Scheduling...
+												{CARD_COPY[scheduling.action.kind].busy}
 											</span>
 										) : (
-											'Confirm Appointment'
+											CARD_COPY[scheduling.action.kind].confirm
 										)}
 									</button>
+
+									<button
+										type="button"
+										onClick={() => {
+											setScheduling(null);
+											setMessages((prev) => [
+												...prev,
+												{
+													role: 'assistant',
+													content: CARD_COPY[scheduling.action.kind].declined,
+												},
+											]);
+										}}
+										disabled={scheduling.isSubmitting}
+										className="w-full mt-2 px-4 py-2 border border-copilot-border text-copilot-text rounded-lg hover:bg-copilot-input disabled:opacity-50 transition-colors text-sm"
+									>
+										{CARD_COPY[scheduling.action.kind].decline}
+									</button>
+
 								</div>
 							</div>
 						)}
